@@ -1,0 +1,7 @@
+{
+  "name": "Easy Offer",
+  "description": "AI 驱动的简历生成与优化平台。将碎片化经历转化为专业的 STAR 法则简历，支持 JD 匹配和面试准备。",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
