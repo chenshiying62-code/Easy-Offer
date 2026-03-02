@@ -8,6 +8,28 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ResumeData, Experience, Education, Project, ResumeStyle } from './types';
+import { GoogleGenAI, Type } from "@google/genai";
+
+// --- AI Service ---
+const getAI = () => {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error("未检测到 Gemini API Key。请在侧边栏的‘机密’面板中配置 GEMINI_API_KEY。");
+  }
+  return new GoogleGenAI({ apiKey });
+};
+
+const cleanJsonString = (str: string) => {
+  // Remove markdown code blocks if present (case-insensitive)
+  let cleaned = str.replace(/```(?:json)?\n?/gi, '').replace(/```\n?$/g, '').trim();
+  // Sometimes AI adds text before or after the JSON block
+  const jsonStart = cleaned.indexOf('{');
+  const jsonEnd = cleaned.lastIndexOf('}');
+  if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
+    cleaned = cleaned.substring(jsonStart, jsonEnd + 1);
+  }
+  return cleaned;
+};
 
 // --- Components ---
 
@@ -160,79 +182,182 @@ export default function App() {
 
     setIsOptimizing(true);
     try {
-      const res = await fetch('/api/ai/optimize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, style })
+      const ai = getAI();
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: `使用 STAR（情境、任务、行动、结果）法则重写以下简历描述。
+        使其专业、注重影响力，并使用强有力的动词。
+        风格：${style}
+        输入： "${text}"`,
+        config: {
+          systemInstruction: "你是一位世界级的职业教练和简历专家。你的目标是将模糊的描述转化为高影响力的、数据驱动的 STAR 简历要点。请务必使用中文回复。",
+        }
       });
-      const data = await res.json();
-      if (data.optimized) {
+
+      if (response.text) {
         const newDesc = [...exp.description];
-        newDesc[bulletIndex] = data.optimized;
+        newDesc[bulletIndex] = response.text;
         updateExperience(expId, 'description', newDesc);
       }
     } catch (err) {
-      console.error(err);
+      console.error("AI Optimization Error:", err);
+      alert("AI 优化失败，请稍后再试。");
     } finally {
       setIsOptimizing(false);
     }
   };
 
   const analyzeJD = async () => {
+    if (!jdText) return;
     setIsAnalyzingJD(true);
+    setJdAnalysis(null);
     try {
-      const res = await fetch('/api/ai/match-jd', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          resumeText: JSON.stringify(resume),
-          jdText 
-        })
+      const ai = getAI();
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: `根据以下职位描述（JD）分析此简历。
+        1. 识别缺失的关键技能/关键词。
+        2. 提出 3 条具体的改进建议，使简历更好地匹配 JD。
+        3. 给出 ATS 兼容性评分（0-100）。
+        请务必使用中文回复。
+        
+        简历内容: ${JSON.stringify(resume)}
+        职位描述 (JD): ${jdText}`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              missingKeywords: { type: Type.ARRAY, items: { type: Type.STRING }, description: "缺失的关键技能或关键词" },
+              suggestions: { type: Type.ARRAY, items: { type: Type.STRING }, description: "改进建议" },
+              atsScore: { type: Type.NUMBER, description: "ATS 匹配分数" }
+            },
+            required: ["missingKeywords", "suggestions", "atsScore"]
+          }
+        }
       });
-      const data = await res.json();
-      setJdAnalysis(data);
+
+      if (response.text) {
+        const cleaned = cleanJsonString(response.text);
+        console.log("JD Analysis Response:", cleaned);
+        const data = JSON.parse(cleaned);
+        setJdAnalysis(data);
+      } else {
+        throw new Error("AI 未返回有效内容");
+      }
     } catch (err) {
-      console.error(err);
+      console.error("JD Analysis Error:", err);
+      alert("JD 分析失败：" + (err instanceof Error ? err.message : "未知错误"));
     } finally {
       setIsAnalyzingJD(false);
     }
   };
 
   const parseSmartInput = async () => {
+    if (!smartInputText) return;
     setIsParsingSmartInput(true);
     try {
-      const res = await fetch('/api/ai/parse-unstructured', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: smartInputText })
+      const ai = getAI();
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: `将以下关于个人经历的非结构化文本解析并提取为结构化的简历数据。
+        文本可能包含个人信息、工作经历、教育背景、技能和项目。
+        请尽可能详细地提取信息，并使用专业术语进行润色。
+        
+        输入文本: "${smartInputText}"`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              personalInfo: {
+                type: Type.OBJECT,
+                properties: {
+                  fullName: { type: Type.STRING },
+                  email: { type: Type.STRING },
+                  phone: { type: Type.STRING },
+                  location: { type: Type.STRING },
+                  summary: { type: Type.STRING }
+                }
+              },
+              experience: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    company: { type: Type.STRING },
+                    position: { type: Type.STRING },
+                    location: { type: Type.STRING },
+                    startDate: { type: Type.STRING },
+                    endDate: { type: Type.STRING },
+                    description: { type: Type.ARRAY, items: { type: Type.STRING } }
+                  }
+                }
+              },
+              education: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    school: { type: Type.STRING },
+                    degree: { type: Type.STRING },
+                    field: { type: Type.STRING },
+                    location: { type: Type.STRING },
+                    startDate: { type: Type.STRING },
+                    endDate: { type: Type.STRING }
+                  }
+                }
+              },
+              skills: { type: Type.ARRAY, items: { type: Type.STRING } },
+              projects: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    name: { type: Type.STRING },
+                    description: { type: Type.STRING }
+                  }
+                }
+              }
+            }
+          }
+        }
       });
-      const data = await res.json();
-      
-      // Map IDs to the parsed data
-      const structuredData: ResumeData = {
-        ...resume,
-        personalInfo: data.personalInfo || resume.personalInfo,
-        experience: (data.experience || []).map((exp: any) => ({
-          ...exp,
-          id: Math.random().toString(36).substr(2, 9),
-          current: exp.endDate === '至今' || exp.endDate === 'Present'
-        })),
-        education: (data.education || []).map((edu: any) => ({
-          ...edu,
-          id: Math.random().toString(36).substr(2, 9)
-        })),
-        skills: data.skills || resume.skills,
-        projects: (data.projects || []).map((proj: any) => ({
-          ...proj,
-          id: Math.random().toString(36).substr(2, 9)
-        }))
-      };
-      
-      setResume(structuredData);
-      setShowSmartInputModal(false);
-      setSmartInputText('');
+
+      if (response.text) {
+        const cleaned = cleanJsonString(response.text);
+        console.log("Smart Input Response:", cleaned);
+        const data = JSON.parse(cleaned);
+        
+        // Map IDs to the parsed data
+        const structuredData: ResumeData = {
+          ...resume,
+          personalInfo: data.personalInfo || resume.personalInfo,
+          experience: (data.experience || []).map((exp: any) => ({
+            ...exp,
+            id: Math.random().toString(36).substr(2, 9),
+            current: exp.endDate === '至今' || exp.endDate === 'Present'
+          })),
+          education: (data.education || []).map((edu: any) => ({
+            ...edu,
+            id: Math.random().toString(36).substr(2, 9)
+          })),
+          skills: data.skills || resume.skills,
+          projects: (data.projects || []).map((proj: any) => ({
+            ...proj,
+            id: Math.random().toString(36).substr(2, 9)
+          }))
+        };
+        
+        setResume(structuredData);
+        setShowSmartInputModal(false);
+        setSmartInputText('');
+      } else {
+        throw new Error("AI 未返回有效内容");
+      }
     } catch (err) {
-      console.error(err);
+      console.error("Smart Input Parsing Error:", err);
+      alert("智能解析失败：" + (err instanceof Error ? err.message : "未知错误"));
     } finally {
       setIsParsingSmartInput(false);
     }
